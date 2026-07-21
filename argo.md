@@ -1,9 +1,7 @@
-# Argo CD + Immutable Tags — LMB Production (Option 1)
+# Argo CD + Immutable Tags — LMB Production
 
-**Pilot:** `lmb_statement_generator`  
+**Example repo:** `lmb_statement_generator`  
 **Approach:** GitHub Actions pushes `prd-<github.run_number>` to ACR → updates **GitOps repo** → **Argo CD** syncs Deployment in `middleware-prd-ns`  
-**Cluster:** PRD (FortiClient VPN)  
-**Date:** 2026-07-21  
 
 ---
 
@@ -15,7 +13,7 @@ Today CI pushes mutable `pddlmbcr.azurecr.io/statementgenerator:prd`. Deployment
 
 ---
 
-## 2. Flow (Option 1)
+## 2. Flow
 
 ```text
 Merge to production
@@ -61,34 +59,17 @@ kubectl auth can-i patch deployments -n middleware-prd-ns \
   --as=system:serviceaccount:argocd:argocd-application-controller
 # Expect: yes
 
-# 5) Grant app team access to argocd ns (replace placeholders)
+# 5) Grant  access to  me/sunil for argocd ns (replace placeholders)
 kubectl create rolebinding argocd-team-admin \
   --clusterrole=admin \
   --user=<USER_EMAIL_OR_NAME> \
   -n argocd
 
-# Or group:
-# kubectl create rolebinding argocd-team-admin \
-#   --clusterrole=admin \
-#   --group=<AAD_GROUP> \
-#   -n argocd
 
 # 6) Share initial admin password securely
 kubectl -n argocd get secret argocd-initial-admin-secret \
   -o jsonpath="{.data.password}" | base64 -d; echo
 ```
-
-**Helm alternative:**
-
-```bash
-helm repo add argo https://argoproj.github.io/argo-helm
-helm repo update
-helm upgrade --install argocd argo/argo-cd \
-  --namespace argocd \
-  --create-namespace \
-  --wait
-```
-
 **Admin checklist**
 
 - [ ] `argocd` namespace created  
@@ -99,7 +80,7 @@ helm upgrade --install argocd argo/argo-cd \
 
 ---
 
-## 4. Pilot — `lmb_statement_generator`
+## 4. Example Repo — `lmb_statement_generator`
 
 ### Today (production)
 
@@ -248,22 +229,4 @@ After Argo owns the app, do not change the image manually in Lens; change GitOps
 | `lmb_processing_scripts` | `processingscripts:prd` |
 | `lmb_kafka_connector` | `kafkaconnector:prd` |
 
-Align `lmb_processing_scripts` / `lmb_kafka_connector` triggers to **push → production** when migrating (today they run on PR open).
-
 ---
-
-## 6. Checklist
-
-**Admin**
-
-- [ ] Complete §3 install  
-
-**App / DevOps**
-
-- [ ] Create `lmb-gitops`  
-- [ ] Add statementgenerator values + Argo Application  
-- [ ] Add `GITOPS_TOKEN` to `lmb_statement_generator`  
-- [ ] Update `prodacr.yml` to `prd-${{ github.run_number }}` + GitOps update step  
-- [ ] Validate ACR + GitOps + Deployment tag match  
-- [ ] Rollback test with previous `prd-<n>`  
-- [ ] Roll out remaining repos  
