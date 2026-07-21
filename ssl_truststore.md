@@ -1,4 +1,4 @@
-# Ruya SSL Truststore Workaround (`emw.ruyabank.ae`)
+# Ruya SSL Truststore Workaround
 
 ## Problem
 
