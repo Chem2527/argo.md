@@ -1,4 +1,4 @@
-# Ruya SSL Truststore Workaround
+#  SSL Truststore Workaround
 
 ## Problem
 
