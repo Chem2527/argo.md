@@ -1,9 +1,11 @@
 # Argo CD + Immutable Tags — LMB Production (Option 1)
 
 **Audience:** Platform / DevOps / app owners (forwardable)  
-**Approach:** **Option 1** — GitHub Actions pushes immutable image to ACR, then updates a **GitOps repo**; **Argo CD** syncs that Git state into Kubernetes.  
+**Chosen approach:** **Option 1** (recommended) — GitHub Actions pushes immutable image to ACR, then updates a **GitOps repo**; **Argo CD** syncs that Git state into Kubernetes.  
+**Not chosen for pilot:** Option 2 (Argo CD Image Updater) — defer until many repos make CI→GitOps steps heavy.  
 **Pilot service:** `lmb_statement_generator`  
 **Cluster:** PRD (access from laptop via **FortiClient VPN**)  
+**Argo CD location:** Runs **inside the cluster** (`argocd` ns). Laptop only opens UI via VPN + port-forward (not a local Argo install).  
 **Date:** 2026-07-21  
 
 **Status:** Proposal / design only. No production branches were modified in this review.
@@ -50,9 +52,77 @@ Argo CD (watches GitOps repo)
 
 Argo CD does **not** watch GitHub Actions and does **not** “fetch images from GHA.” It only applies what is in the GitOps repo.
 
+### Decision: Option 1 vs Option 2
+
+| | **Option 1 (CHOSEN)** | Option 2 (later / optional) |
+|---|---|---|
+| How new tag reaches Argo | **GitHub Actions** updates GitOps after green build | **Image Updater** watches ACR and writes Git |
+| Extra cluster component | No | Yes (Image Updater) |
+| Clear “CI passed ⇒ deploy this tag” | **Yes** | Indirect |
+| Recommendation | **Use this for pilot and rollout** | Revisit only if CI→GitOps steps become too heavy across many repos |
+
+**Team decision: proceed with Option 1.**
+
 ---
 
-## 3. Access / ownership (important for install)
+## 3. Accessing Argo CD from your laptop (FortiClient VPN)
+
+Argo CD is **not** installed on your PC. It runs **inside the PRD cluster** (namespace `argocd`). Your laptop only opens the UI/API over VPN.
+
+### Local expose (recommended for PRD — no public URL needed)
+
+```bash
+# 1) Connect FortiClient VPN
+# 2) Confirm cluster context
+kubectl config current-context
+kubectl get ns argocd
+
+# 3) Port-forward Argo CD server to localhost
+kubectl -n argocd port-forward svc/argocd-server 8080:443
+
+# 4) Browser: https://localhost:8080
+#    User: admin
+#    Password:
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath="{.data.password}" | base64 -d; echo
+```
+
+You can do the same port-forward from **Lens** (forward `argocd-server` service → local port).
+
+| Method | When to use |
+|---|---|
+| `kubectl port-forward` / Lens forward | **Default for PRD** (VPN-only, simple) |
+| Internal Ingress / private LB | Later, for shared team URL (still VPN / private network) |
+| Public Internet Ingress | **Not recommended** for production Argo without strong SSO + IP allowlists |
+
+Without FortiClient VPN, port-forward to PRD will fail or hang.
+
+---
+
+## 4. Argo CD vs Lens — same Deployments (this is the requirement)
+
+**Yes — the requirement is that Argo CD updates the live Deployment objects in the cluster** (the same ones you see and edit today in Lens).
+
+| Tool | What it does |
+|---|---|
+| **Lens** | UI to **view** (and today, sometimes manually edit) Deployments, Pods, Secrets, ConfigMaps |
+| **Argo CD** | Reads GitOps → **applies/syncs** the Deployment in `middleware-prd-ns` via Kubernetes API |
+| **GitHub Actions** | Builds/pushes image to ACR + writes `image.tag` into GitOps (Option 1) |
+
+Example for pilot:
+
+1. CI pushes `pddlmbcr.azurecr.io/statementgenerator:prd-87`  
+2. CI sets GitOps `tag: prd-87`  
+3. Argo CD syncs → live Deployment `statementgenerator` image = `...:prd-87`  
+4. Open **Lens** → same Deployment → you **see** `prd-87`  
+
+Argo CD does **not** “push an image” and does **not** edit Lens. It updates Kubernetes; Lens shows the result.
+
+**After Argo manages the app:** do **not** keep changing that Deployment’s image by hand in Lens. With `selfHeal: true`, Argo will overwrite manual edits to match Git. Change the tag in **GitOps** (or roll back in Argo UI) instead.
+
+---
+
+## 5. Access / ownership (important for install)
 
 | Action | Who |
 |---|---|
@@ -74,9 +144,9 @@ After that, we can operate with existing rights (Deployments / Secrets / ConfigM
 
 ---
 
-## 4. Pilot example — `lmb_statement_generator`
+## 6. Pilot example — `lmb_statement_generator`
 
-### 4.1 Current state (production branch + live cluster)
+### 6.1 Current state (production branch + live cluster)
 
 **Repo:** `lmb_statement_generator`  
 **Branch:** `production`  
@@ -104,7 +174,7 @@ on:
 | imagePullPolicy | `Always` |
 | Port | `6103` |
 
-### 4.2 Target state
+### 6.2 Target state
 
 | Item | Target |
 |---|---|
@@ -117,9 +187,9 @@ on:
 
 ---
 
-## 5. Concrete changes for the pilot
+## 7. Concrete changes for the pilot
 
-### 5.1 New GitOps repo: `lmb-gitops`
+### 7.1 New GitOps repo: `lmb-gitops`
 
 ```text
 lmb-gitops/
@@ -143,7 +213,7 @@ image:
 
 **Do not put secrets into this repo.** Keep using existing K8s Secrets / ConfigMaps (we can create/update those).
 
-### 5.2 Update `prodacr.yml` in `lmb_statement_generator` (production)
+### 7.2 Update `prodacr.yml` in `lmb_statement_generator` (production)
 
 Conceptual workflow (team to implement when approved):
 
@@ -203,7 +273,7 @@ jobs:
 
 **Safer prod variant:** CI opens a PR to `lmb-gitops` instead of direct push; merge = approve deploy. Start with manual Argo sync if preferred.
 
-### 5.3 Argo CD Application (created in `argocd` ns after admin install)
+### 7.3 Argo CD Application (created in `argocd` ns after admin install)
 
 ```yaml
 apiVersion: argoproj.io/v1alpha1
@@ -231,7 +301,7 @@ spec:
       - CreateNamespace=false
 ```
 
-### 5.4 What the team will see end-to-end (example run)
+### 7.4 What the team will see end-to-end (example run)
 
 1. Developer merges to `production` on `lmb_statement_generator`.  
 2. Actions run #87 succeeds.  
@@ -239,12 +309,13 @@ spec:
 4. CI updates `lmb-gitops` → `tag: prd-87`.  
 5. Argo CD syncs → Deployment `statementgenerator` image becomes `...:prd-87`.  
 6. Pods roll; nodes pull `prd-87` from ACR.  
+7. In **Lens**, open Deployment `statementgenerator` → image shows `...:prd-87` (same object Argo updated).  
 
 **Rollback:** set GitOps tag back to `prd-86` (or Argo History → Rollback) → sync → pods run build 86 again (tag must still exist in ACR).
 
 ---
 
-## 6. Why not Image Updater (Option 2) for now?
+## 8. Why not Image Updater (Option 2) for now?
 
 | | Option 1 (CI → GitOps) | Option 2 (Image Updater) |
 |---|---|---|
@@ -257,7 +328,7 @@ spec:
 
 ---
 
-## 7. Other services (same pattern later)
+## 9. Other services (same pattern later)
 
 | App repo | ACR image (today `:prd`) |
 |---|---|
@@ -280,7 +351,7 @@ All live under Helm in **`middleware-prd-ns`**.
 
 ---
 
-## 8. Rollout steps (team checklist)
+## 10. Rollout steps (team checklist)
 
 ### Phase 0 — Admin / access
 
@@ -288,7 +359,8 @@ All live under Helm in **`middleware-prd-ns`**.
 - [ ] Admin creates namespace `argocd`  
 - [ ] Admin installs Argo CD (CRDs + control plane)  
 - [ ] Argo CD can manage `middleware-prd-ns`  
-- [ ] Our team can use Argo UI/CLI + existing Deploy/Secret/CM rights  
+- [ ] Our team can use Argo UI via **VPN + port-forward** (or Lens forward) + existing Deploy/Secret/CM rights  
+- [ ] Confirm **Option 1** (not Image Updater) for pilot
 
 ### Phase 1 — GitOps + pilot wiring
 
@@ -307,7 +379,7 @@ All live under Helm in **`middleware-prd-ns`**.
 
 - [ ] Confirm ACR has `statementgenerator:prd-<n>`  
 - [ ] Confirm GitOps `tag:` matches  
-- [ ] Confirm Deployment image matches  
+- [ ] Confirm Deployment image matches (kubectl **and** Lens)  
 - [ ] **Rollback test:** previous `prd-<n-1>` restores old pods  
 
 ### Phase 4 — Expand
@@ -318,13 +390,28 @@ All live under Helm in **`middleware-prd-ns`**.
 
 ---
 
-## 9. FAQ
+## 11. FAQ
+
+**Q: Option 1 or Option 2?**  
+A: **Option 1** for this project (CI → GitOps → Argo). Option 2 (Image Updater) later only if needed.
+
+**Q: How do we open Argo UI if we only have FortiClient VPN?**  
+A: Argo runs in-cluster. Use `kubectl -n argocd port-forward svc/argocd-server 8080:443` (or Lens port-forward), then `https://localhost:8080`. No public expose required for PRD.
+
+**Q: Is Argo installed on my laptop?**  
+A: No. Only the UI/CLI talk to the in-cluster Argo over VPN.
+
+**Q: Will Argo update the same Deployments we see in Lens?**  
+A: **Yes — that is the requirement.** Argo syncs the live Kubernetes Deployment; Lens shows the updated image/tag.
+
+**Q: Should we still edit the image in Lens after Argo owns the app?**  
+A: No. Change GitOps (or Argo rollback). Manual Lens image edits will fight `selfHeal`.
 
 **Q: Does Argo CD pick the latest image from ACR automatically?**  
 A: No. Option 1: **CI writes the new tag into GitOps**. Argo CD syncs Git → Deployment.
 
 **Q: Does Argo CD push images?**  
-A: No. CI pushes to ACR. Argo CD only updates the Deployment manifest/spec. Nodes pull from ACR.
+A: No. CI pushes to ACR. Argo CD only updates the Deployment spec. Nodes pull from ACR.
 
 **Q: Can we install Argo CD without creating a namespace?**  
 A: Namespace must exist first (admin). We can manage Deployments/Secrets/ConfigMaps; we still need admin for `argocd` ns + CRDs/ClusterRoles.
@@ -337,17 +424,19 @@ A: Stable, immutable per workflow run; easy to read in ACR and GitOps. Optional 
 
 ---
 
-## 10. Ask for team agreement
+## 12. Ask for team agreement
 
-1. Adopt **Option 1** (CI → GitOps → Argo CD).  
+1. Adopt **Option 1** (CI → GitOps → Argo CD) — **not** Image Updater for the pilot.  
 2. Pilot on **`lmb_statement_generator`**: move from `:prd` to `:prd-<github.run_number>`.  
 3. Admin creates **`argocd`** namespace and installs Argo CD.  
-4. Create **`lmb-gitops`** as the only source of truth for prod image tags.  
-5. After successful pilot + rollback test, roll out to the other LMB services.
+4. Team accesses Argo via **FortiClient VPN + local port-forward** (Lens optional).  
+5. Argo updates the **same live Deployments** visible in Lens; GitOps becomes source of truth for image tags.  
+6. Create **`lmb-gitops`** as the only source of truth for prod image tags.  
+7. After successful pilot + rollback test, roll out to the other LMB services.
 
 ---
 
-## 11. Reference — current statement generator workflow (production)
+## 13. Reference — current statement generator workflow (production)
 
 ```yaml
 name: prod acr
